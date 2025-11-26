@@ -25,65 +25,92 @@ const firebaseConfig = {
   measurementId: "G-004FZK6EXT",
 };
 
-const CHECKIN_TAG = "checkin-reminder";
-const CHECKIN_TYPE = "LONG_CHECKIN_REMINDER";
-
-self.addEventListener("notificationclose", (event) => {
-  if (event.notification.tag === CHECKIN_TAG) {
-    console.log("[FMSW] Reminder closed");
-  }
-});
-
-function isCheckinReminder(payload) {
-  return payload?.data?.type === CHECKIN_TYPE;
+function getTag(payload) {
+  return payload?.data?.tag || null;
+}
+function getType(payload) {
+  return payload?.data?.type || null;
+}
+function getTitle(payload) {
+  return payload?.notification?.title || payload?.data?.title || null;
+}
+function getBody(payload) {
+  return payload?.notification?.body || payload?.data?.body || "";
 }
 
-async function maybeShowCheckinReminder(payload) {
-  const existing = await self.registration.getNotifications({
-    tag: CHECKIN_TAG,
-  });
-  if (existing.length > 0) return;
+self.addEventListener("notificationclose", (event) => {
+  const tag = event.notification.tag;
+  const type = event.notification?.data?.type || null;
+  console.log("[FMSW] Notification closed:", { tag, type });
+});
 
-  const title = payload?.notification?.title || payload?.data?.title;
+async function maybeShowByTag(payload) {
+  const tag = getTag(payload);
+  const type = getType(payload);
+  if (!tag) return;
+
+  // If a notification with the same tag and type is already shown, skip duplicates.
+  const existing = await self.registration.getNotifications({ tag });
+  const hasSameTagAndType = existing.some((n) => {
+    const nType = n?.data?.type || null;
+    return n.tag === tag && nType === type;
+  });
+  if (hasSameTagAndType) return;
+
+  const title = getTitle(payload);
   if (!title) return;
 
-  const body = payload?.notification?.body || payload?.data?.body || "";
+  const body = getBody(payload);
 
   self.registration.showNotification(title, {
     body,
     icon: payload?.data?.icon || "/pwa-192x192.png",
-    data: payload?.data || {},
-    tag: CHECKIN_TAG,
+    data: { ...(payload?.data || {}), type },
+    tag,
     renotify: false,
     requireInteraction: true,
   });
 }
 
 try {
-  firebase.initializeApp(firebaseConfig);
-  const messaging = firebase.messaging();
+  if (!firebase?.apps?.length) {
+    firebase.initializeApp(firebaseConfig);
+    console.log("[FMSW] Firebase app initialized");
+  } else {
+    console.log("[FMSW] Firebase app already initialized");
+  }
 
-  console.log(
-    "[FMSW] Firebase Messaging initialized in firebase-messaging-sw.js"
-  );
+  const messaging = firebase.messaging?.();
+  if (!messaging) {
+    console.warn("[FMSW] Firebase messaging unavailable (compat API missing)");
+  } else {
+    console.log("[FMSW] Firebase Messaging initialized");
 
-  messaging.onBackgroundMessage(async (payload) => {
-    if (isCheckinReminder(payload)) {
-      await maybeShowCheckinReminder(payload);
-      return;
-    }
+    messaging.onBackgroundMessage(async (payload) => {
+      try {
+        await maybeShowByTag(payload);
+      } catch (err) {
+        console.warn("[FMSW] maybeShowByTag failed", err);
+      }
 
-    const title =
-      payload?.notification?.title || payload?.data?.title || "Notification";
+      const hasTag = !!payload?.data?.tag;
+      if (hasTag) return;
 
-    const options = {
-      body: payload?.notification?.body || payload?.data?.body || "",
-      icon: payload?.data?.icon || "/pwa-192x192.png",
-      data: payload?.data || {},
-    };
+      const title = payload?.notification?.title || payload?.data?.title;
+      if (!title) {
+        console.warn("[FMSW] Skipping notification: missing title");
+        return;
+      }
 
-    self.registration.showNotification(title, options);
-  });
+      const options = {
+        body: payload?.notification?.body || payload?.data?.body || "",
+        icon: payload?.data?.icon || "/pwa-192x192.png",
+        data: payload?.data || {},
+      };
+
+      self.registration.showNotification(title, options);
+    });
+  }
 } catch (err) {
-  console.warn("[FMSW] Firebase messaging not initialized", err);
+  console.warn("[FMSW] Firebase initialization failed", err);
 }
